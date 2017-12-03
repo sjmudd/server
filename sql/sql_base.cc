@@ -5502,7 +5502,12 @@ find_field_in_table(THD *thd, TABLE *table, const char *name, uint length,
 
   if (field_ptr && *field_ptr)
   {
-    *cached_field_index_ptr= (uint)(field_ptr - table->field);
+    if ((*field_ptr)->field_visibility == COMPLETELY_INVISIBLE)
+    {
+      if (DBUG_EVALUATE_IF("test_completely_invisible", 0, 1))
+	    DBUG_RETURN((Field*)0);
+    }
+    *cached_field_index_ptr= field_ptr - table->field;
     field= *field_ptr;
   }
   else
@@ -7581,6 +7586,14 @@ insert_fields(THD *thd, Name_resolution_context *context, const char *db_name,
 
     for (; !field_iterator.end_of_fields(); field_iterator.next())
     {
+      /*
+        field() is always NULL for views (see, e.g. Field_iterator_view or
+        Field_iterator_natural_join).
+        But view fields can never be invisible.
+      */
+      if ((field= field_iterator.field()) &&
+          field->field_visibility != NOT_INVISIBLE)
+        continue;
       Item *item;
 
       if (!(item= field_iterator.create_item(thd)))
@@ -8186,8 +8199,11 @@ fill_record(THD *thd, TABLE *table, Field **ptr, List<Item> &values,
   uint autoinc_index= table->next_number_field
                         ? table->next_number_field->field_index
                         : ~0U;
+  bool need_default_value= false;
   DBUG_ENTER("fill_record");
-
+  if (table->s->tmp_table < INTERNAL_TMP_TABLE &&
+        values.elements != table->s->fields)
+    need_default_value= true;
   if (!*ptr)
   {
     /* No fields to update, quite strange!*/
@@ -8210,7 +8226,10 @@ fill_record(THD *thd, TABLE *table, Field **ptr, List<Item> &values,
     /* Ensure that all fields are from the same table */
     DBUG_ASSERT(field->table == table);
 
-    value=v++;
+    if (need_default_value && field->field_visibility != NOT_INVISIBLE)
+      continue;
+    else
+      value=v++;
     if (field->field_index == autoinc_index)
       table->auto_increment_field_not_null= TRUE;
     if (field->vcol_info)
