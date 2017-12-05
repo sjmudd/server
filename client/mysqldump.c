@@ -115,7 +115,7 @@ static my_bool  verbose= 0, opt_no_create_info= 0, opt_no_data= 0, opt_no_data_m
                 opt_events= 0, opt_comments_used= 0,
                 opt_alltspcs=0, opt_notspcs= 0, opt_logging,
                 opt_drop_trigger= 0 ;
-static my_bool insert_pat_inited= 0, debug_info_flag= 0, debug_check_flag= 0;
+static my_bool insert_pat_inited= 0, debug_info_flag= 0, debug_check_flag= 0, invisble_table= 0;
 static ulong opt_max_allowed_packet, opt_net_buffer_length;
 static MYSQL mysql_connection,*mysql=0;
 static DYNAMIC_STRING insert_pat;
@@ -2726,7 +2726,7 @@ static uint get_table_structure(char *table, char *db, char *table_type,
   complete_insert= 0;
   if ((write_data= !(*ignore_flag & IGNORE_DATA)))
   {
-    complete_insert= opt_complete_insert;
+    invisble_table= complete_insert= opt_complete_insert;
     if (!insert_pat_inited)
     {
       insert_pat_inited= 1;
@@ -2971,6 +2971,12 @@ static uint get_table_structure(char *table, char *db, char *table_type,
       DBUG_RETURN(0);
     }
 
+    while ((row= mysql_fetch_row(result)))
+    {
+     if (strlen(row[SHOW_EXTRA]) && strstr(row[SHOW_EXTRA],"INVISIBLE"))
+       invisble_table= complete_insert= opt_complete_insert= 1;
+    }
+    mysql_data_seek(result, 0);
     /*
       If write_data is true, then we build up insert statements for
       the table's data. Note: in subsequent lines of code, this test
@@ -3617,7 +3623,7 @@ static void dump_table(char *table, char *db)
 {
   char ignore_flag;
   char buf[200], table_buff[NAME_LEN+3];
-  DYNAMIC_STRING query_string;
+  DYNAMIC_STRING query_string, select_field_names;
   char table_type[NAME_LEN];
   char *result_table, table_buff2[NAME_LEN*2+3], *opt_quoted_table;
   int error= 0;
@@ -3687,7 +3693,25 @@ static void dump_table(char *table, char *db)
   verbose_msg("-- Sending SELECT query...\n");
 
   init_dynamic_string_checked(&query_string, "", 1024, 1024);
+  init_dynamic_string_checked(&select_field_names, "", 1024, 1024);
 
+  if (invisble_table)
+  {
+    /*
+      Copy field name from insert_pat into select_field_names because
+      select * from table will leave hidden columns.
+      We will search for "(" in insert_pat and will copy the whole data
+      into select_field_names , and then we will search for ")" in
+      select_field_names and decrese the lenght accordingly.
+    */
+    char *ptr= insert_pat.str;
+    while ( *ptr++ != '(' ){}
+    dynstr_append_checked(&select_field_names, ptr);
+    ptr= &select_field_names.str[select_field_names.length - 1];
+    while ( *ptr-- != ')')
+      select_field_names.length--;
+    select_field_names.str[select_field_names.length- 1]= 0;
+  }
   if (path)
   {
     char filename[FN_REFLEN], tmp_path[FN_REFLEN];
@@ -3708,7 +3732,13 @@ static void dump_table(char *table, char *db)
 
     /* now build the query string */
 
-    dynstr_append_checked(&query_string, "SELECT /*!40001 SQL_NO_CACHE */ * INTO OUTFILE '");
+    dynstr_append_checked(&query_string, "SELECT /*!40001 SQL_NO_CACHE */ ");
+    if (invisble_table)
+      dynstr_append_checked(&query_string, select_field_names.str);
+    else
+      dynstr_append_checked(&query_string, "*");
+    dynstr_append_checked(&query_string, " INTO OUTFILE '");
+    dynstr_free(&select_field_names);
     dynstr_append_checked(&query_string, filename);
     dynstr_append_checked(&query_string, "'");
 
@@ -3757,7 +3787,13 @@ static void dump_table(char *table, char *db)
                   "\n--\n-- Dumping data for table %s\n--\n",
                   fix_for_comment(result_table));
     
-    dynstr_append_checked(&query_string, "SELECT /*!40001 SQL_NO_CACHE */ * FROM ");
+    dynstr_append_checked(&query_string, "SELECT /*!40001 SQL_NO_CACHE */ ");
+    if (invisble_table)
+      dynstr_append_checked(&query_string, select_field_names.str);
+    else
+      dynstr_append_checked(&query_string, "*");
+    dynstr_free(&select_field_names);
+    dynstr_append_checked(&query_string, " FROM ");
     dynstr_append_checked(&query_string, result_table);
 
     if (where)
